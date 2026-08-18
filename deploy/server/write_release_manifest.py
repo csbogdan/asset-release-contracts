@@ -156,6 +156,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="fail if any artifact has no sibling .minisig (use after the sign job has run)",
     )
+    ap.add_argument(
+        "--required-setting",
+        action="append",
+        default=[],
+        metavar="NAME",
+        dest="required_settings",
+        help="NAME of an application setting this release cannot start without "
+        "(repeatable). NAMES ONLY — never a value: this manifest ships to every "
+        "customer, and their values live only in their own key vault.",
+    )
     ap.add_argument("artifacts", nargs="+", type=Path, help="artifact file(s) to describe")
     return ap
 
@@ -163,9 +173,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _build_arg_parser().parse_args(argv)
     _log(f"describing {len(args.artifacts)} artifact(s) for version {args.version}")
+    if args.required_settings:
+        _log(f"required settings (names only): {', '.join(args.required_settings)}")
+    else:
+        _log(
+            "WARNING: no --required-setting given — this release declares that it needs "
+            "nothing, so a deployment missing its database URL or master key will start "
+            "and fail rather than being refused with a useful message"
+        )
     try:
         manifest = build_manifest(
-            args.version, args.artifacts, require_signature=args.require_signatures
+            args.version,
+            args.artifacts,
+            require_signature=args.require_signatures,
+            required_settings=tuple(args.required_settings),
         )
     except ReleaseManifestError as exc:
         print(f"[release-manifest] ERROR: {exc}", file=sys.stderr)

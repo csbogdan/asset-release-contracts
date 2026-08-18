@@ -184,3 +184,49 @@ def test_required_settings_carry_names_and_never_values(tmp_path: Path) -> None:
     assert manifest["required_settings"] == ["ASSDISC_DATABASE_URL", "ASSDISC_MASTER_KEY"]
     # Names only — nothing that could be a value.
     assert all(isinstance(n, str) for n in manifest["required_settings"])
+
+
+def test_required_settings_come_from_the_command_line(tmp_path: Path) -> None:
+    """CI declares what a release needs; the manifest carries it to the customer.
+
+    The supervisor's side of this already worked — it validates required
+    settings against the customer's vault and refuses to start the application
+    when one is missing. But nothing ever POPULATED the list, so every published
+    manifest declared that the release needed nothing and the check had nothing
+    to enforce. A deployment missing its database URL started and died on boot
+    instead of being refused with a message naming the problem.
+    """
+    a = _write(tmp_path / "a.tar.zst", b"payload")
+    out = tmp_path / "release.json"
+
+    rc = wrm.main(
+        [
+            "--version",
+            "0.1.0",
+            "--output",
+            str(out),
+            "--required-setting",
+            "ASSDISC_DATABASE_URL",
+            "--required-setting",
+            "ASSDISC_MASTER_KEY",
+            str(a),
+        ]
+    )
+
+    assert rc == 0
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert doc["required_settings"] == ["ASSDISC_DATABASE_URL", "ASSDISC_MASTER_KEY"]
+
+
+def test_a_manifest_with_no_required_settings_says_so_out_loud(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Declaring nothing is legal but is almost never what was meant."""
+    a = _write(tmp_path / "a.tar.zst", b"payload")
+    out = tmp_path / "release.json"
+
+    rc = wrm.main(["--version", "0.1.0", "--output", str(out), str(a)])
+
+    assert rc == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["required_settings"] == []
+    assert "WARNING" in capsys.readouterr().out
