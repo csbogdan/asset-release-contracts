@@ -92,6 +92,7 @@ def build_manifest(
     *,
     require_signature: bool,
     component: str = "server",
+    required_settings: tuple[str, ...] = (),
     entrypoint: tuple[str, ...] = ("{slot}/asset-discovery-server/asset-discovery-server",),
     port: int = 8000,
     ready_path: str = "/api/ready",
@@ -124,6 +125,11 @@ def build_manifest(
         "port": port,
         "ready_path": ready_path,
         "bundle_digest": "sha256:" + bundle.hexdigest(),
+        # NAMES ONLY. What the release cannot start without — never what the
+        # values are. Values exist solely in the customer's key vault; putting
+        # one here would ship a customer's credential inside an artifact that
+        # every customer receives.
+        "required_settings": list(required_settings),
         "artifacts": [e.to_dict() for e in entries],
     }
 

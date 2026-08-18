@@ -164,3 +164,23 @@ def test_main_require_signatures_present_returns_zero(tmp_path: Path) -> None:
     # time; it simply is not carried in the manifest, because the manifest
     # itself is what gets signed.
     assert doc["artifacts"][0]["name"] == a.name
+
+
+def test_required_settings_carry_names_and_never_values(tmp_path: Path) -> None:
+    """The manifest says what a release NEEDS, never what the value is.
+
+    Values live only in the customer's key vault. One in here would ship a
+    single customer's credential inside an artifact every customer receives.
+    """
+    a = _write(tmp_path / "a.tar.zst", b"payload")
+
+    manifest = wrm.build_manifest(
+        "0.1.0",
+        [a],
+        require_signature=False,
+        required_settings=("ASSDISC_DATABASE_URL", "ASSDISC_MASTER_KEY"),
+    )
+
+    assert manifest["required_settings"] == ["ASSDISC_DATABASE_URL", "ASSDISC_MASTER_KEY"]
+    # Names only — nothing that could be a value.
+    assert all(isinstance(n, str) for n in manifest["required_settings"])
