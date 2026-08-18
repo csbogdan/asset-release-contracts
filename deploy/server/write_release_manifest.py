@@ -93,7 +93,38 @@ def build_manifest(
     require_signature: bool,
     component: str = "server",
     required_settings: tuple[str, ...] = (),
-    entrypoint: tuple[str, ...] = ("{slot}/asset-discovery-server/asset-discovery-server",),
+    # The COMPLETE command, not just the binary. The frozen artifact is a Typer
+    # CLI: invoked bare it prints its help and exits 2, which a supervisor sees
+    # as a child that started and immediately stopped. Measured on a customer
+    # install — the release was fetched, verified, unpacked and exec'd perfectly,
+    # and the application printed usage:
+    #
+    #     supervisor.child.probe_failed exit_code=2
+    #       reason='child exited before becoming ready'
+    #
+    # `--host 0.0.0.0` because it binds inside a container and the CLI default is
+    # 127.0.0.1, which nothing outside the container could reach.
+    #
+    # `--tls-terminated` because the application REFUSES to bind without TLS
+    # unless told something in front of it terminates TLS. Every supported
+    # deployment puts it behind an ingress that does exactly that, which is what
+    # makes this the honest flag rather than --insecure-allow-http — that one
+    # exists for development and renders a warning on every page.
+    entrypoint: tuple[str, ...] = (
+        "{slot}/asset-discovery-server/asset-discovery-server",
+        "serve",
+        "--host",
+        # S104 is about a service unintentionally exposed on every interface.
+        # Here the interface IS the container boundary: the process binds inside
+        # its own network namespace and is reachable only through the ingress in
+        # front of it. The CLI default of 127.0.0.1 would bind to the container's
+        # loopback, where nothing outside the container — including the
+        # platform's own health probe — could ever reach it.
+        "0.0.0.0",  # noqa: S104 - binds inside a container, not on a host NIC
+        "--port",
+        "{port}",
+        "--tls-terminated",
+    ),
     port: int = 8000,
     ready_path: str = "/api/ready",
 ) -> dict[str, object]:

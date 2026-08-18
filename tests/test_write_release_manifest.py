@@ -230,3 +230,27 @@ def test_a_manifest_with_no_required_settings_says_so_out_loud(
     assert rc == 0
     assert json.loads(out.read_text(encoding="utf-8"))["required_settings"] == []
     assert "WARNING" in capsys.readouterr().out
+
+
+def test_the_entrypoint_is_a_complete_command_not_just_the_binary(tmp_path: Path) -> None:
+    """A bare binary path starts, prints help, and exits — twice now.
+
+    The frozen artifact is a Typer CLI. Invoked with no subcommand it writes its
+    usage to stdout and exits 2, which a supervisor observes as a child that
+    started and immediately stopped: `probe_failed exit_code=2, reason='child
+    exited before becoming ready'`. Everything upstream of that — fetch, verify,
+    digest, unpack — worked perfectly, which is what makes it expensive to
+    diagnose and worth pinning here.
+    """
+    a = _write(tmp_path / "a.tar.zst", b"payload")
+
+    entrypoint = wrm.build_manifest("0.1.0", [a], require_signature=False)["entrypoint"]
+
+    assert isinstance(entrypoint, list)
+    assert entrypoint[1] == "serve", "a subcommand is required or the CLI just prints help"
+    # Binds inside a container: the CLI default of 127.0.0.1 is unreachable there.
+    assert "--host" in entrypoint and "0.0.0.0" in entrypoint
+    # The port is substituted from the manifest, never hardcoded twice.
+    assert "{port}" in entrypoint
+    # The app refuses to bind without TLS unless told the ingress terminates it.
+    assert "--tls-terminated" in entrypoint
