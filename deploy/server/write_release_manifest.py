@@ -15,9 +15,10 @@ this at a glance, but solve a different problem:
   entries are read back from uploaded blob metadata, and it is deliberately
   decoupled from ``asset_discovery.server.*``.
 * This script writes a per-release manifest from LOCAL BUILD OUTPUT, before
-  anything is published anywhere. Publishing the server artifact (item 3 in
-  the delivery-loop scope) is a separate, not-yet-built piece of work; this
-  manifest is what that future publish step would read.
+  anything is published anywhere. ``publish_release.py`` — the next step in
+  the same workflow — reads what this writes: it relays these exact bytes
+  (and their detached signature) to the vendor console, never a
+  re-serialised copy, because the signature covers the bytes.
 
 Usage::
 
