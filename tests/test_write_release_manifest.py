@@ -385,3 +385,68 @@ def test_the_manifest_the_writer_emits_parses_as_the_supervisor_reads_it(
     constants = wrm.read_schema_constants()
     assert window.runs_against_min == constants["RUNS_AGAINST_MIN"]
     assert window.migrates_to == constants["MIGRATES_TO"]
+
+
+# --------------------------------------------------------------------------- #
+# A component is a PROFILE, not a label.                                        #
+#                                                                               #
+# The obvious way to add ontology support is a `--component` flag over the       #
+# existing server-shaped defaults. That is the dangerous way: CI would stamp a   #
+# SERVER build as `component: ontology` — correctly signed, correctly published, #
+# offered to an ontology deployment — and every downstream check would pass,     #
+# because the only thing wrong is the one field nothing verifies against the     #
+# bytes. So the flag selects entrypoint, port, readiness path and whether the    #
+# schema window applies, and an unregistered component is REFUSED.               #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_component_decides_the_shape_not_just_the_label(tmp_path: Path) -> None:
+    art = _write(tmp_path / "asset-discovery-server-1.0.0-linux-x86_64.tar.zst", b"x")
+    server = wrm.build_manifest("1.0.0", [art], require_signature=False)
+    onto = wrm.build_manifest("1.0.0", [art], require_signature=False, component="ontology")
+
+    # The label moved...
+    assert server["component"] == "server"
+    assert onto["component"] == "ontology"
+    # ...and so did everything that decides how it RUNS.
+    assert server["entrypoint"] != onto["entrypoint"]
+    assert server["port"] != onto["port"]
+    assert server["ready_path"] != onto["ready_path"]
+    assert server["typ"] != onto["typ"]
+
+
+def test_an_unregistered_component_is_refused(tmp_path: Path) -> None:
+    """Fail closed. A component with no profile has no entrypoint, so a manifest
+    for it could only be a server manifest wearing another name."""
+    art = _write(tmp_path / "asset-discovery-server-1.0.0-linux-x86_64.tar.zst", b"x")
+    with pytest.raises(wrm.ReleaseManifestError) as excinfo:
+        wrm.build_manifest("1.0.0", [art], require_signature=False, component="satellite")
+    assert "no build profile" in str(excinfo.value)
+    assert "server" in str(excinfo.value)  # names what IS registered
+
+
+def test_only_a_component_that_owns_the_database_gets_a_schema_window(
+    tmp_path: Path,
+) -> None:
+    """The four numbers are a claim about the PRODUCT DATABASE. The ontology
+    sidecar ships its own read-only graph and migrates nothing, so stamping a
+    migration range on it would invite the console's two-question guard to
+    reason about a migration that cannot happen."""
+    art = _write(tmp_path / "asset-discovery-server-1.0.0-linux-x86_64.tar.zst", b"x")
+    server = wrm.build_manifest("1.0.0", [art], require_signature=False)
+    onto = wrm.build_manifest("1.0.0", [art], require_signature=False, component="ontology")
+
+    for field in ("runs_against_min", "runs_against_max", "migrates_from_min", "migrates_to"):
+        assert field in server
+        assert field not in onto
+
+
+def test_the_ontology_profile_matches_the_sidecar_it_describes() -> None:
+    """These are read from `assets_llm`, not invented: its Dockerfile declares
+    `EXPOSE 8080` and `CMD ["serve-ontology"]`, and `serve.py` serves `/health`.
+    If the sidecar moves, this is the test that should fail."""
+    profile = wrm.profile_for("ontology")
+    assert profile.port == 8080
+    assert profile.ready_path == "/health"
+    assert any("serve-ontology" in part for part in profile.entrypoint)
+    assert profile.has_schema_window is False
