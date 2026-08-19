@@ -33,6 +33,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import sys
@@ -41,6 +42,29 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 _SIGNATURE_SUFFIX = ".minisig"
+
+#: Where the four schema numbers come from: the SOURCE TREE, read at build time.
+#: Nothing types them. They used to be ``schema_min``/``schema_max``
+#: ``workflow_dispatch`` inputs defaulting to "0"/"0" — free text, typed at
+#: dispatch, compared against a fleet reporting "unknown", so the check they
+#: existed for never once fired. Delivery v2 deletes those inputs; a build's
+#: claim about the database is now whatever its own code says.
+_SCHEMA_VERSION_MODULE = (
+    Path(__file__).resolve().parents[2]
+    / "src"
+    / "asset_discovery"
+    / "shared"
+    / "inventory"
+    / "schema_version.py"
+)
+
+#: Read out of that module and stamped into the manifest, under these names.
+_SCHEMA_CONSTANTS: tuple[str, ...] = (
+    "RUNS_AGAINST_MIN",
+    "RUNS_AGAINST_MAX",
+    "MIGRATES_FROM_MIN",
+    "MIGRATES_TO",
+)
 
 
 class ReleaseManifestError(Exception):
@@ -55,6 +79,59 @@ class ArtifactEntry:
 
     def to_dict(self) -> dict[str, object]:
         return {"name": self.name, "size": self.size, "sha256": self.sha256}
+
+
+def read_schema_constants(module_path: Path | None = None) -> dict[str, int]:
+    """Parse ``schema_version.py`` with ``ast`` and return its integer constants.
+
+    Parsed, not IMPORTED, and that is the whole reason this is twenty lines
+    rather than one. This script is deliberately stdlib-only — it runs on a CI
+    runner with no ``pip install`` step, because every dependency added here
+    becomes a dependency of the release — so it cannot ``import
+    asset_discovery``. ``ast`` reads the same file the application compiles from,
+    with no import side effects and no chance of picking up a different
+    installed copy.
+
+    Refuses loudly on a missing name or a non-literal value: a build that
+    silently defaulted one of these would stamp a claim about a customer's
+    database that no code ever made.
+    """
+    path = module_path or _SCHEMA_VERSION_MODULE
+    if not path.is_file():
+        raise ReleaseManifestError(
+            f"cannot read the schema constants: {path} does not exist. The manifest's "
+            "runs_against/migrates fields come from the source tree, not from an input."
+        )
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    found: dict[str, int] = {}
+    wanted = {"SCHEMA_VERSION", *_SCHEMA_CONSTANTS}
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+        elif isinstance(node, ast.Assign):
+            targets = list(node.targets)
+            value = node.value
+        else:
+            continue
+        for target in targets:
+            if not isinstance(target, ast.Name) or target.id not in wanted:
+                continue
+            if not isinstance(value, ast.Constant) or not isinstance(value.value, int):
+                raise ReleaseManifestError(
+                    f"{path.name}: {target.id} must be a plain integer literal so this "
+                    f"stdlib-only script can read it without importing the package; found "
+                    f"{ast.dump(value) if value is not None else 'no value'}"
+                )
+            found[target.id] = int(value.value)
+    missing = sorted(wanted - set(found))
+    if missing:
+        raise ReleaseManifestError(
+            f"{path.name} does not define {', '.join(missing)}. The manifest's schema fields "
+            "are derived from that module and there is no fallback — a defaulted value here "
+            "would be exactly the invented number delivery v2 removed."
+        )
+    return found
 
 
 def sha256_hex(path: Path) -> str:
@@ -128,6 +205,13 @@ def build_manifest(
     ),
     port: int = 8000,
     ready_path: str = "/api/ready",
+    # What a FORK is based on, e.g. "v1.2.2". Passed by the build (a tag, a
+    # merge-base), never typed on a form: the console joins it to customers to
+    # answer "who is running a build without this patch". None on mainline.
+    upstream_ref: str | None = None,
+    # Injected only by the tests that need a fixture module. Production always
+    # reads the real `schema_version.py` next to the application source.
+    schema_module: Path | None = None,
 ) -> dict[str, object]:
     if not version.strip():
         raise ReleaseManifestError("version must not be blank")
@@ -144,7 +228,8 @@ def build_manifest(
     bundle = hashlib.sha256()
     for e in entries:
         bundle.update(e.sha256.encode())
-    return {
+    schema = read_schema_constants(schema_module)
+    manifest: dict[str, object] = {
         "typ": "AD-SERVER-RELEASE",
         "version": version,
         "component": component,
@@ -163,7 +248,17 @@ def build_manifest(
         # every customer receives.
         "required_settings": list(required_settings),
         "artifacts": [e.to_dict() for e in entries],
+        # The four schema numbers, read out of the source tree above. All four
+        # or none — the parser on the far side refuses a partial set, because
+        # three-of-four is not an older release, it is a broken newer one.
+        "runs_against_min": schema["RUNS_AGAINST_MIN"],
+        "runs_against_max": schema["RUNS_AGAINST_MAX"],
+        "migrates_from_min": schema["MIGRATES_FROM_MIN"],
+        "migrates_to": schema["MIGRATES_TO"],
     }
+    if upstream_ref:
+        manifest["upstream_ref"] = upstream_ref
+    return manifest
 
 
 def write_manifest(manifest: dict[str, object], output: Path) -> None:
@@ -198,6 +293,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "(repeatable). NAMES ONLY — never a value: this manifest ships to every "
         "customer, and their values live only in their own key vault.",
     )
+    ap.add_argument(
+        "--upstream-ref",
+        default="",
+        metavar="REF",
+        help="what a FORK is based on, e.g. v1.2.2 (mainline builds omit it). Recorded so "
+        "the console can answer 'who is running a build without this patch'.",
+    )
     ap.add_argument("artifacts", nargs="+", type=Path, help="artifact file(s) to describe")
     return ap
 
@@ -219,10 +321,18 @@ def main(argv: list[str] | None = None) -> int:
             args.artifacts,
             require_signature=args.require_signatures,
             required_settings=tuple(args.required_settings),
+            upstream_ref=args.upstream_ref or None,
         )
     except ReleaseManifestError as exc:
         print(f"[release-manifest] ERROR: {exc}", file=sys.stderr)
         return 1
+    _log(
+        "schema window (read from the source tree, not typed): runs against "
+        f"{manifest['runs_against_min']}-{manifest['runs_against_max']}, migrates from "
+        f"{manifest['migrates_from_min']} to {manifest['migrates_to']}"
+    )
+    if manifest.get("upstream_ref"):
+        _log(f"fork build based on {manifest['upstream_ref']}")
     artifacts = manifest["artifacts"]
     assert isinstance(artifacts, list)
     for entry in artifacts:

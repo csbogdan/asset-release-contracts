@@ -254,3 +254,134 @@ def test_the_entrypoint_is_a_complete_command_not_just_the_binary(tmp_path: Path
     assert "{port}" in entrypoint
     # The app refuses to bind without TLS unless told the ingress terminates it.
     assert "--tls-terminated" in entrypoint
+
+
+# --------------------------------------------------------------------------- #
+# Delivery v2: the four schema fields come from the SOURCE TREE                 #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_manifest_carries_the_four_schema_fields(tmp_path: Path) -> None:
+    """Stamped from ``shared/inventory/schema_version.py``, not from an input.
+
+    They used to be ``--schema-min``/``--schema-max``, typed at workflow
+    dispatch, defaulting to "0". A number a human types about a database they
+    are not looking at is not a fact, and the fleet check comparing against it
+    never fired once.
+    """
+    artifact = _write(tmp_path / "server-1.0.0.tar.zst", b"x")
+    manifest = wrm.build_manifest("1.0.0", [artifact], require_signature=False)
+
+    constants = wrm.read_schema_constants()
+    assert manifest["runs_against_min"] == constants["RUNS_AGAINST_MIN"]
+    assert manifest["runs_against_max"] == constants["RUNS_AGAINST_MAX"]
+    assert manifest["migrates_from_min"] == constants["MIGRATES_FROM_MIN"]
+    assert manifest["migrates_to"] == constants["MIGRATES_TO"]
+
+
+def test_all_four_are_present_or_the_build_fails(tmp_path: Path) -> None:
+    """Never three. A partial set is refused by every parser downstream, so a
+    writer that could emit one would produce an unusable signed release."""
+    artifact = _write(tmp_path / "server-1.0.0.tar.zst", b"x")
+    manifest = wrm.build_manifest("1.0.0", [artifact], require_signature=False)
+
+    present = [
+        name
+        for name in (
+            "runs_against_min",
+            "runs_against_max",
+            "migrates_from_min",
+            "migrates_to",
+        )
+        if name in manifest
+    ]
+    assert len(present) == 4
+
+
+def test_the_constants_are_read_without_importing_the_package(tmp_path: Path) -> None:
+    """``ast``, not ``import``. The writer runs on a CI runner with no
+    ``pip install`` step, because every dependency here becomes a dependency of
+    the release."""
+    module = tmp_path / "schema_version.py"
+    module.write_text(
+        "SCHEMA_VERSION: int = 4\n"
+        "RUNS_AGAINST_MIN: int = 2\n"
+        "RUNS_AGAINST_MAX: int = 4\n"
+        "MIGRATES_FROM_MIN: int = 3\n"
+        "MIGRATES_TO: int = 4\n",
+        encoding="utf-8",
+    )
+
+    assert wrm.read_schema_constants(module) == {
+        "SCHEMA_VERSION": 4,
+        "RUNS_AGAINST_MIN": 2,
+        "RUNS_AGAINST_MAX": 4,
+        "MIGRATES_FROM_MIN": 3,
+        "MIGRATES_TO": 4,
+    }
+
+
+def test_a_missing_constant_fails_loudly(tmp_path: Path) -> None:
+    """No fallback. A defaulted value here would be exactly the invented number
+    delivery v2 removed — stamped into a SIGNED document, so unfixable after."""
+    module = tmp_path / "schema_version.py"
+    module.write_text("SCHEMA_VERSION: int = 1\nRUNS_AGAINST_MIN: int = 1\n", encoding="utf-8")
+
+    with pytest.raises(wrm.ReleaseManifestError) as excinfo:
+        wrm.read_schema_constants(module)
+    assert "MIGRATES_TO" in str(excinfo.value)
+
+
+def test_a_non_literal_constant_fails_loudly(tmp_path: Path) -> None:
+    """``MIGRATES_TO = SCHEMA_VERSION`` reads better and cannot be parsed."""
+    module = tmp_path / "schema_version.py"
+    module.write_text(
+        "SCHEMA_VERSION: int = 1\n"
+        "RUNS_AGAINST_MIN: int = 1\n"
+        "RUNS_AGAINST_MAX: int = 1\n"
+        "MIGRATES_FROM_MIN: int = 1\n"
+        "MIGRATES_TO = SCHEMA_VERSION\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(wrm.ReleaseManifestError) as excinfo:
+        wrm.read_schema_constants(module)
+    assert "integer literal" in str(excinfo.value)
+
+
+def test_a_missing_schema_module_fails_loudly(tmp_path: Path) -> None:
+    with pytest.raises(wrm.ReleaseManifestError) as excinfo:
+        wrm.read_schema_constants(tmp_path / "does-not-exist.py")
+    assert "does not exist" in str(excinfo.value)
+
+
+def test_upstream_ref_is_present_only_for_a_fork_build(tmp_path: Path) -> None:
+    """A mainline build is based on nothing, and a key present-but-null would
+    make every consumer write a null check for a case that cannot happen."""
+    artifact = _write(tmp_path / "server-1.0.0.tar.zst", b"x")
+
+    mainline = wrm.build_manifest("1.0.0", [artifact], require_signature=False)
+    assert "upstream_ref" not in mainline
+
+    fork = wrm.build_manifest("1.0.0", [artifact], require_signature=False, upstream_ref="v1.2.2")
+    assert fork["upstream_ref"] == "v1.2.2"
+
+
+def test_the_manifest_the_writer_emits_parses_as_the_supervisor_reads_it(
+    tmp_path: Path,
+) -> None:
+    """The two halves of the contract, measured against each other.
+
+    The writer and the parser are in different packages, shipped in different
+    artifacts, and a disagreement between them surfaces as an unverifiable
+    release on a customer's machine. This is the only test that has both.
+    """
+    from asset_discovery.shared.release.schema_window import parse_schema_window
+
+    artifact = _write(tmp_path / "server-1.0.0.tar.zst", b"x")
+    manifest = wrm.build_manifest("1.0.0", [artifact], require_signature=False)
+
+    window = parse_schema_window(manifest)
+    constants = wrm.read_schema_constants()
+    assert window.runs_against_min == constants["RUNS_AGAINST_MIN"]
+    assert window.migrates_to == constants["MIGRATES_TO"]
