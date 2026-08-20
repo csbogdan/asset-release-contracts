@@ -515,7 +515,12 @@ def test_the_ontology_profile_matches_the_sidecar_it_describes() -> None:
     `EXPOSE 8080` and `CMD ["serve-ontology"]`, and `serve.py` serves `/health`.
     If the sidecar moves, this is the test that should fail."""
     profile = wrm.profile_for("ontology")
-    assert profile.port == 8080
+    # 8090: nginx holds 8080 inside the supervisor container. Kept in step with
+    # assets_llm's own writer, which is the one that actually stamps an ontology
+    # manifest — this profile exists so THIS repo can describe the component,
+    # and the two drifting is how a release gets published with a port nothing
+    # can bind.
+    assert profile.port == 8090
     assert profile.ready_path == "/health"
     assert any("serve-ontology" in part for part in profile.entrypoint)
     assert profile.has_schema_window is False

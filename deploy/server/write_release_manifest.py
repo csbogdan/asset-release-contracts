@@ -267,7 +267,16 @@ _SERVER_PROFILE = ComponentProfile(
 _ONTOLOGY_PROFILE = ComponentProfile(
     typ="AD-ONTOLOGY-RELEASE",
     entrypoint=("{slot}/asset-ontology/serve-ontology",),
-    port=8080,
+    # 8090, NOT the 8080 its own Dockerfile EXPOSEs. That number is right for a
+    # standalone container and wrong here: inside the supervisor container nginx
+    # already binds 8080 as the ingress, so a child told to take 8080 can never
+    # start. The server profile uses 8000 and never met this.
+    #
+    # The service reads ONTOLOGY_PORT (defaulting to 8080), so the deployment
+    # template sets it to match — see install.bicep. Manifest and env have to
+    # agree: the supervisor probes and proxies the port the MANIFEST names, and
+    # the application binds the port the ENV names.
+    port=8090,
     ready_path="/health",
     supervised=True,
     has_schema_window=False,
