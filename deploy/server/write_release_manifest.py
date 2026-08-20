@@ -164,6 +164,36 @@ def build_artifact_entry(artifact: Path, *, require_signature: bool) -> Artifact
     )
 
 
+def build_signature_entry(artifact: Path) -> ArtifactEntry | None:
+    """The archive's ``.minisig`` as an artifact in its own right, or None.
+
+    WHY THIS EXISTS, found in the field rather than in review: the manifest
+    named the three platform archives and NOT their signatures, so the console
+    stored three archives and no ``.minisig``. A customer's server then
+    downloaded all three (130 MB + 72 MB + 72 MB), found no signature to verify
+    them against, and refused every one:
+
+        release.sync.unsigned_refused  kind=satellite platform=linux-x86_64
+        release.sync.completed  candidates=3 refused=3 synced=0
+
+    The refusal was CORRECT — ``requires_signature`` is True and unsigned
+    binaries must not reach a customer's fleet. The pipeline was simply never
+    shipping the thing that would let them pass.
+
+    Naming the signature here is what puts it in ``artifact_urls``, which is the
+    only route by which the console can serve it. A signature that exists only
+    on the build runner protects nobody.
+    """
+    sig_path = artifact.with_name(artifact.name + _SIGNATURE_SUFFIX)
+    if not sig_path.is_file():
+        return None
+    return ArtifactEntry(
+        name=sig_path.name,
+        size=sig_path.stat().st_size,
+        sha256=sha256_hex(sig_path),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Component profiles                                                            #
 #                                                                               #
@@ -368,6 +398,11 @@ def build_manifest(
     if not artifacts:
         raise ReleaseManifestError("no artifacts given — refusing to write an empty manifest")
     entries = [build_artifact_entry(a, require_signature=require_signature) for a in artifacts]
+    # Each archive's `.minisig` is named too, so the console stores and serves
+    # it. Appended rather than interleaved so the archives keep their given
+    # order, and `bundle_digest` below hashes over BOTH — the signatures are
+    # part of what this release IS.
+    entries += [e for e in (build_signature_entry(a) for a in artifacts) if e is not None]
     # Refuses an unregistered component — see PROFILES.
     profile = profile_for(component)
     # The profiles are constants, so these can only fire on a badly written one.

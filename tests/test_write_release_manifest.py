@@ -519,3 +519,53 @@ def test_the_ontology_profile_matches_the_sidecar_it_describes() -> None:
     assert profile.ready_path == "/health"
     assert any("serve-ontology" in part for part in profile.entrypoint)
     assert profile.has_schema_window is False
+
+
+# --------------------------------------------------------------------------- #
+# Signatures are artifacts too (found in the field).                           #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("component", ["satellite", "agent"])
+def test_the_manifest_names_each_archives_signature(tmp_path: Path, component: str) -> None:
+    """A ``.minisig`` that only exists on the build runner protects nobody.
+
+    THE FIELD FAILURE THIS CLOSES: the manifest named three platform archives
+    and not their signatures, so the console stored three archives and no
+    ``.minisig``. A customer's server pulled all three — 130 MB + 72 MB + 72 MB
+    — found nothing to verify them against, and refused every one:
+
+        release.sync.unsigned_refused  kind=satellite platform=linux-x86_64
+        release.sync.completed  candidates=3 refused=3 synced=0
+
+    The refusal was CORRECT: ``requires_signature`` is True and unsigned
+    binaries must not reach a customer's fleet. The pipeline simply never
+    shipped the thing that would let them pass. Naming the signature is what
+    puts it in ``artifact_urls``, which is the only route the console has to
+    serve it.
+    """
+    names = []
+    for platform in ("linux-x86_64", "macos-arm64"):
+        art = _write(tmp_path / f"asset-discovery-{component}-1.0.0-{platform}.tar.gz", b"x")
+        _write(Path(str(art) + ".minisig"), b"untrusted comment: sig\n")
+        names.append(art)
+
+    manifest = wrm.build_manifest("1.0.0", names, require_signature=True, component=component)
+
+    described = {a["name"] for a in manifest["artifacts"]}
+    for art in names:
+        assert art.name in described
+        assert f"{art.name}.minisig" in described, "the signature must be a named artifact"
+
+
+def test_the_bundle_digest_covers_the_signatures_too(tmp_path: Path) -> None:
+    """They are part of what the release IS, so changing one changes the digest."""
+    art = _write(tmp_path / "asset-discovery-satellite-1.0.0-linux-x86_64.tar.gz", b"x")
+    sig = Path(str(art) + ".minisig")
+
+    _write(sig, b"untrusted comment: first\n")
+    first = wrm.build_manifest("1.0.0", [art], require_signature=True, component="satellite")
+    _write(sig, b"untrusted comment: second\n")
+    second = wrm.build_manifest("1.0.0", [art], require_signature=True, component="satellite")
+
+    assert first["bundle_digest"] != second["bundle_digest"]
