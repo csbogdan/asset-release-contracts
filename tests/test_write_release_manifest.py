@@ -416,13 +416,82 @@ def test_the_component_decides_the_shape_not_just_the_label(tmp_path: Path) -> N
 
 
 def test_an_unregistered_component_is_refused(tmp_path: Path) -> None:
-    """Fail closed. A component with no profile has no entrypoint, so a manifest
-    for it could only be a server manifest wearing another name."""
+    """Fail closed. A component with no profile has no packaging rules at all,
+    so a manifest for it could only be another component's manifest wearing a
+    different name.
+
+    The example used to be ``satellite``. It is now a REGISTERED relayed
+    component (ADR-0039), so this test needed a genuinely unknown name — a test
+    that pins a limitation stops testing anything the moment the limitation is
+    lifted, and would have silently become an assertion about nothing.
+    """
     art = _write(tmp_path / "asset-discovery-server-1.0.0-linux-x86_64.tar.zst", b"x")
     with pytest.raises(wrm.ReleaseManifestError) as excinfo:
-        wrm.build_manifest("1.0.0", [art], require_signature=False, component="satellite")
+        wrm.build_manifest("1.0.0", [art], require_signature=False, component="collector")
     assert "no build profile" in str(excinfo.value)
     assert "server" in str(excinfo.value)  # names what IS registered
+    assert "satellite" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
+# Relayed components (ADR-0039): nothing supervises them.                      #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("component", ["satellite", "agent"])
+def test_a_relayed_component_declares_no_process(tmp_path: Path, component: str) -> None:
+    """No entrypoint, no port, no ready_path — because nothing starts it.
+
+    The customer's server hands the archive to a machine, and the installer
+    inside the archive puts it under systemd or a Windows service. Emitting a
+    port here would be a fact nothing reads and nothing can honour: the same
+    shape as a guard that reads a field nothing can set.
+    """
+    art = _write(tmp_path / f"asset-discovery-{component}-1.0.0-linux-x86_64.tar.gz", b"x")
+    manifest = wrm.build_manifest("1.0.0", [art], require_signature=False, component=component)
+
+    assert manifest["component"] == component
+    for field in ("entrypoint", "port", "ready_path"):
+        assert field not in manifest, f"{component} must not declare {field}"
+
+
+@pytest.mark.parametrize("component", ["satellite", "agent"])
+def test_a_relayed_component_has_no_schema_window(tmp_path: Path, component: str) -> None:
+    """Neither owns or migrates the product database."""
+    art = _write(tmp_path / f"asset-discovery-{component}-1.0.0-linux-x86_64.tar.gz", b"x")
+    manifest = wrm.build_manifest("1.0.0", [art], require_signature=False, component=component)
+
+    for field in ("runs_against_min", "runs_against_max", "migrates_from_min", "migrates_to"):
+        assert field not in manifest
+
+
+def test_every_component_has_its_own_typ(tmp_path: Path) -> None:
+    """A shared `typ` across components is a correctly-signed manifest that is
+    wrong in the one way nothing downstream detects."""
+    art = _write(tmp_path / "asset-discovery-server-1.0.0-linux-x86_64.tar.zst", b"x")
+    typs = {
+        c: wrm.build_manifest("1.0.0", [art], require_signature=False, component=c)["typ"]
+        for c in wrm.PROFILES
+    }
+    assert len(set(typs.values())) == len(typs), typs
+
+
+def test_a_relayed_profile_carrying_a_port_is_refused() -> None:
+    """A profile that says `supervised=False` and still names a port is one
+    somebody edited without deciding what kind of component it is. Refused
+    rather than ignored, because a manifest naming a port nothing binds is a
+    lie a reader would reasonably believe."""
+    bad = wrm.ComponentProfile(
+        typ="AD-BROKEN-RELEASE",
+        supervised=False,
+        entrypoint=None,
+        port=9000,
+        ready_path=None,
+        has_schema_window=False,
+    )
+    with pytest.raises(wrm.ReleaseManifestError) as excinfo:
+        wrm._validate_profile_shape("broken", bad)  # type: ignore[attr-defined]
+    assert "not supervised" in str(excinfo.value)
 
 
 def test_only_a_component_that_owns_the_database_gets_a_schema_window(

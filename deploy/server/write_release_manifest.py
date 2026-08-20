@@ -182,12 +182,25 @@ def build_artifact_entry(artifact: Path, *, require_signature: bool) -> Artifact
 
 @dataclass(frozen=True, slots=True)
 class ComponentProfile:
-    """How one component is packaged and run."""
+    """How one component is packaged and, if anything runs it, run."""
 
     typ: str
-    entrypoint: tuple[str, ...]
-    port: int
-    ready_path: str
+    #: Whether a SUPERVISOR starts this component and waits for it to be ready.
+    #:
+    #: False for a RELAYED component (ADR-0039). A satellite is not started by
+    #: anything in the customer's environment that we ship: the customer's
+    #: server hands the archive to a machine, and an installer on that machine
+    #: puts it under systemd or a Windows service. There is no slot to
+    #: substitute, no port to bind, and no readiness endpoint to poll.
+    #:
+    #: The three fields below are None exactly when this is False. Filling them
+    #: in with plausible values would be three facts nothing will ever read —
+    #: the same shape as a guard that reads a field nothing can set: it looks
+    #: configured, it is wrong, and it can never fire.
+    supervised: bool
+    entrypoint: tuple[str, ...] | None
+    port: int | None
+    ready_path: str | None
     #: Whether this component owns the product database. Only a component that
     #: MIGRATES the schema has a meaningful `runs_against` / `migrates` window;
     #: for anything else the four numbers would be a claim about a database it
@@ -213,6 +226,7 @@ _SERVER_PROFILE = ComponentProfile(
     ),
     port=8000,
     ready_path="/api/ready",
+    supervised=True,
     has_schema_window=True,
 )
 
@@ -225,13 +239,81 @@ _ONTOLOGY_PROFILE = ComponentProfile(
     entrypoint=("{slot}/asset-ontology/serve-ontology",),
     port=8080,
     ready_path="/health",
+    supervised=True,
+    has_schema_window=False,
+)
+
+#: The two RELAYED components (ADR-0039). Nothing supervises them: the
+#: customer's server fetches the archive and serves it to a machine, whose own
+#: installer (`install.sh` / `install.ps1`, shipped inside the archive) puts the
+#: binary under systemd or a Windows service. So no entrypoint, no port, no
+#: readiness path — and no schema window either, since neither touches the
+#: product database.
+#:
+#: They keep their EXISTING signing keys, which are already compiled into the
+#: customer's server (`server/releases/source.py::release_public_key`). This
+#: adds a manifest around an artifact that was already built and already signed;
+#: it does not introduce a new trust root.
+_SATELLITE_PROFILE = ComponentProfile(
+    typ="AD-SATELLITE-RELEASE",
+    supervised=False,
+    entrypoint=None,
+    port=None,
+    ready_path=None,
+    has_schema_window=False,
+)
+
+_AGENT_PROFILE = ComponentProfile(
+    typ="AD-AGENT-RELEASE",
+    supervised=False,
+    entrypoint=None,
+    port=None,
+    ready_path=None,
     has_schema_window=False,
 )
 
 PROFILES: dict[str, ComponentProfile] = {
     "server": _SERVER_PROFILE,
     "ontology": _ONTOLOGY_PROFILE,
+    "satellite": _SATELLITE_PROFILE,
+    "agent": _AGENT_PROFILE,
 }
+
+
+def _validate_profile_shape(component: str, profile: ComponentProfile) -> None:
+    """A profile must be entirely supervised or entirely not — never half.
+
+    Extracted so the invariant has a name and can be tested directly. The two
+    halves fail differently and both matter:
+
+    * a SUPERVISED component missing an entrypoint, port or readiness path
+      produces a manifest the thin layer cannot start;
+    * a RELAYED component CARRYING one is a profile somebody edited without
+      deciding which kind of component it is, and a manifest naming a port
+      nothing binds is a lie a reader would reasonably believe.
+
+    The second is refused rather than ignored for that reason.
+    """
+    if profile.supervised:
+        if not profile.ready_path or not profile.ready_path.startswith("/"):
+            raise ReleaseManifestError(
+                f"ready_path must start with '/': {profile.ready_path!r} (component {component!r})"
+            )
+        if profile.port is None or not 1 <= profile.port <= 65535:
+            raise ReleaseManifestError(
+                f"port out of range: {profile.port} (component {component!r})"
+            )
+        if not profile.entrypoint:
+            raise ReleaseManifestError(
+                f"a supervised component needs an entrypoint (component {component!r})"
+            )
+        return
+    if profile.entrypoint or profile.port or profile.ready_path:
+        raise ReleaseManifestError(
+            f"component {component!r} is not supervised, so it must declare no entrypoint, "
+            "port or ready_path — nothing starts it, and those fields would describe a "
+            "process that does not exist"
+        )
 
 
 def profile_for(component: str) -> ComponentProfile:
@@ -292,12 +374,7 @@ def build_manifest(
     # They are kept because a profile is the thing a new component author adds,
     # and a readiness path without a leading slash produces a supervisor that
     # probes the wrong URL forever rather than an error anyone can read.
-    if not profile.ready_path.startswith("/"):
-        raise ReleaseManifestError(
-            f"ready_path must start with '/': {profile.ready_path!r} (component {component!r})"
-        )
-    if not 1 <= profile.port <= 65535:
-        raise ReleaseManifestError(f"port out of range: {profile.port} (component {component!r})")
+    _validate_profile_shape(component, profile)
     # The digest of the release as a whole — what a deployment reports as
     # ASSDISC_BUNDLE_DIGEST, and what the fleet table compares against to tell a
     # deployment running what we think it is from one that is not.
@@ -309,13 +386,6 @@ def build_manifest(
         "version": version,
         "component": component,
         "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        # How the thin layer actually RUNS this release. It cannot know these
-        # itself: the image is a runtime, and the entrypoint belongs to the
-        # application that was packaged. `{slot}` is substituted with the
-        # unpacked slot directory.
-        "entrypoint": list(profile.entrypoint),
-        "port": profile.port,
-        "ready_path": profile.ready_path,
         "bundle_digest": "sha256:" + bundle.hexdigest(),
         # NAMES ONLY. What the release cannot start without — never what the
         # values are. Values exist solely in the customer's key vault; putting
@@ -334,6 +404,18 @@ def build_manifest(
     # migration range on it would invite the console's two-question guard to
     # reason about a migration that cannot happen. Absent is the honest value,
     # and the manifest parser already treats absent as "pre-v2 / unstated".
+    # How the thin layer actually RUNS this release. It cannot know these
+    # itself: the image is a runtime, and the entrypoint belongs to the
+    # application that was packaged. `{slot}` is substituted with the unpacked
+    # slot directory.
+    #
+    # Omitted entirely for a relayed component. Absent is the honest value —
+    # the same choice the schema window already makes below — and it is what
+    # lets a reader tell "nothing starts this" from "this starts on port 0".
+    if profile.supervised:
+        manifest["entrypoint"] = list(profile.entrypoint or ())
+        manifest["port"] = profile.port
+        manifest["ready_path"] = profile.ready_path
     if profile.has_schema_window:
         schema = read_schema_constants(schema_module)
         manifest["runs_against_min"] = schema["RUNS_AGAINST_MIN"]
