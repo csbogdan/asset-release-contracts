@@ -1,0 +1,27 @@
+[project]
+name = "asset-release-contracts"
+version = "0.1.0"
+description = "The release contract: manifest format, minisign verification, component and schema-window rules."
+requires-python = ">=3.12"
+# The ONLY runtime dependency, and it is here because minisign verification is
+# Ed25519. Everything else in this package is deliberately stdlib: it is
+# consumed by a CI runner with no install step and by a supervisor that must
+# not grow a dependency surface in order to check a signature.
+# >=50.0.0, matching the floor this project already enforces. An earlier draft
+# said >=42, which would have let the one package that performs signature
+# verification resolve a cryptography older than the rest of the product is
+# allowed to use — a security floor lowered by a copy-paste.
+dependencies = ["cryptography>=50.0.0"]
+
+# pytest is NOT a runtime dependency — nothing consuming this package needs it —
+# but the extraction runs the suite before publishing, and an environment built
+# without it fails at the pytest invocation rather than at anything real.
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/asset_release"]
