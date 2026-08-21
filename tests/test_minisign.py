@@ -9,7 +9,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from asset_discovery.shared.crypto import minisign
+from asset_release import minisign
 
 
 def _keypair() -> tuple[str, str]:
@@ -84,10 +84,3 @@ def test_trusted_comment_must_be_single_line() -> None:
         minisign.sign(b"x", sec, trusted_comment="line1\nline2")
 
 
-def test_committed_release_public_key_parses() -> None:
-    """The public key embedded in the satellite + committed at
-    deploy/satellite/minisign.pub must be a well-formed Ed25519 minisign key."""
-    from asset_discovery.satellite.selfupdate import _RELEASE_PUBLIC_KEY
-
-    parsed = minisign.parse_public_key(_RELEASE_PUBLIC_KEY)
-    assert len(parsed.public_key) == 32

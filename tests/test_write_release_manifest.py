@@ -373,7 +373,7 @@ def test_the_manifest_the_writer_emits_parses_as_the_supervisor_reads_it(
     artifacts, and a disagreement between them surfaces as an unverifiable
     release on a customer's machine. This is the only test that has both.
     """
-    from asset_discovery.shared.release.schema_window import parse_schema_window
+    from asset_release.schema_window import parse_schema_window
 
     artifact = _write(tmp_path / "server-1.0.0.tar.zst", b"x")
     manifest = wrm.build_manifest("1.0.0", [artifact], require_signature=False)
