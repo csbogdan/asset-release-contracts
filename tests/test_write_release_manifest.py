@@ -8,21 +8,18 @@ Loaded as a module the same way ``tests/test_publish_releases.py`` loads
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
-_MODULE_PATH = (
-    Path(__file__).resolve().parents[1] / "deploy" / "server" / "write_release_manifest.py"
-)
-_spec = importlib.util.spec_from_file_location("write_release_manifest", _MODULE_PATH)
-assert _spec is not None and _spec.loader is not None
-wrm = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = wrm
-_spec.loader.exec_module(wrm)
+# The writer is a real package module now, not a script loaded off a path.
+# It moved to `asset_release` because the ontology repository needs the SAME
+# implementation — its private copy of this file drifted and shipped a manifest
+# naming a port nginx already held. Importing it normally is also what every
+# consumer does, so the test exercises the real entry point rather than a
+# file-path load that would keep passing after the package broke.
+from asset_release import writer as wrm
 
 
 def _write(path: Path, content: bytes) -> Path:
@@ -511,18 +508,36 @@ def test_only_a_component_that_owns_the_database_gets_a_schema_window(
 
 
 def test_the_ontology_profile_matches_the_sidecar_it_describes() -> None:
-    """These are read from `assets_llm`, not invented: its Dockerfile declares
-    `EXPOSE 8080` and `CMD ["serve-ontology"]`, and `serve.py` serves `/health`.
-    If the sidecar moves, this is the test that should fail."""
+    """Checked against what the ARTIFACT contains, not against the Dockerfile.
+
+    This test previously asserted the entrypoint contained `serve-ontology`,
+    taken from the sidecar image's `CMD ["serve-ontology"]`. That is what the
+    CONTAINER runs; it is not what the shipped bundle contains. The release
+    artifact is a PyInstaller bundle staged at `dist/ontology-service/` whose
+    launcher is `run-ontology.sh`, which is what assets_llm's own writer has
+    always declared — and why the ontology currently running on a customer
+    works at all.
+
+    So the test was pinning the wrong value, and it would have failed the
+    correct fix. That is worse than no test: it enforced a mismatch between a
+    signed manifest and the bundle it describes, in a package whose entire job
+    is to describe bundles accurately. A manifest naming a nonexistent
+    executable installs, verifies its signature, and never starts.
+
+    If the sidecar's launcher moves, this is still the test that should fail —
+    it just has to compare against the launcher, not against the image command.
+    """
     profile = wrm.profile_for("ontology")
     # 8090: nginx holds 8080 inside the supervisor container. Kept in step with
-    # assets_llm's own writer, which is the one that actually stamps an ontology
-    # manifest — this profile exists so THIS repo can describe the component,
-    # and the two drifting is how a release gets published with a port nothing
-    # can bind.
+    # assets_llm's own writer, which is the one that stamps an ontology manifest
+    # today — the two drifting is how a release gets published with a port
+    # nothing can bind, which has already happened once.
     assert profile.port == 8090
     assert profile.ready_path == "/health"
-    assert any("serve-ontology" in part for part in profile.entrypoint)
+    assert any("run-ontology.sh" in part for part in profile.entrypoint), (
+        "the entrypoint must name the launcher inside the bundle "
+        "(dist/ontology-service/run-ontology.sh), not the image's CMD"
+    )
     assert profile.has_schema_window is False
 
 
@@ -557,7 +572,16 @@ def test_the_manifest_names_each_archives_signature(tmp_path: Path, component: s
 
     manifest = wrm.build_manifest("1.0.0", names, require_signature=True, component=component)
 
-    described = {a["name"] for a in manifest["artifacts"]}
+    # Bound and narrowed, the way `writer.main` already does it. `build_manifest`
+    # returns dict[str, object], so `manifest["artifacts"]` is `object` and not
+    # iterable as far as mypy is concerned. This only started failing when the
+    # test switched from loading the module off a path — which made every
+    # attribute `Any` and checked nothing — to importing the py.typed package,
+    # where the declared return type becomes real. The stricter type is the point
+    # of the move; this is what paying for it looks like.
+    artifacts = manifest["artifacts"]
+    assert isinstance(artifacts, list)
+    described = {a["name"] for a in artifacts}
     for art in names:
         assert art.name in described
         assert f"{art.name}.minisig" in described, "the signature must be a named artifact"
