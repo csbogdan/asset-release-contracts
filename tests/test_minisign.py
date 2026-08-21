@@ -59,7 +59,7 @@ def test_tampered_trusted_comment_fails() -> None:
     pub, sec = _keypair()
     data = b"payload"
     sig = minisign.sign(data, sec, trusted_comment="satellite 0.2.1 linux-x86_64")
-    tampered = sig.replace("linux-x86_64", "linux-arm64")
+    tampered = sig.replace("linux-x86_64", "macos-arm64")
     # The global signature binds the trusted comment, so this is rejected.
     assert minisign.verify(data, tampered, pub) is False
 

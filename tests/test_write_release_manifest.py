@@ -88,7 +88,7 @@ def test_build_manifest_no_artifacts_raises() -> None:
 
 def test_build_manifest_shape(tmp_path: Path) -> None:
     a = _write(tmp_path / "asset-discovery-server-0.1.0-linux-x86_64.tar.zst", b"aaa")
-    b = _write(tmp_path / "asset-discovery-server-0.1.0-linux-arm64.tar.zst", b"bbbb")
+    b = _write(tmp_path / "asset-discovery-server-0.1.0-macos-arm64.tar.zst", b"bbbb")
     manifest = wrm.build_manifest("0.1.0", [a, b], require_signature=False)
 
     assert manifest["typ"] == "AD-SERVER-RELEASE"
